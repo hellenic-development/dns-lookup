@@ -13,12 +13,16 @@ A fully-featured DNS Lookup and Domain WHOIS package written in Go.
 ### DNS Lookup
 - **Multiple Record Types**: A, AAAA, CNAME, MX, NS, TXT, PTR, SRV
 - **Flexible Configuration**: Custom DNS resolvers, timeouts, and more
+- **Proxy Support**: HTTP and SOCKS5 proxy support via ProxyURL or custom dialers
+- **Custom Dialers**: Bring your own dialer for advanced network configurations
 - **Batch Lookups**: Query all record types at once
 - **Context Support**: Full context.Context integration for cancellation and timeouts
 
 ### WHOIS Lookup
 - **Extensive TLD Support**: 50+ TLDs with dedicated WHOIS servers
 - **Automatic Referrals**: Follows WHOIS server referrals automatically
+- **Proxy Support**: HTTP and SOCKS5 proxy support via ProxyURL or custom dialers
+- **Custom Dialers**: Bring your own dialer for advanced network configurations
 - **Parsed Data**: Extracts registrar, dates, name servers, status, and emails
 - **Raw Response**: Full raw WHOIS response included
 - **Custom Servers**: Override default WHOIS servers per TLD
@@ -206,6 +210,8 @@ dns-lookup -v
 config := &dns.Config{
     Timeout:        5 * time.Second,    // Query timeout
     CustomResolver: "8.8.8.8:53",       // Custom DNS server
+    ProxyURL:       "socks5://localhost:1080", // Optional: SOCKS5 or HTTP proxy
+    Dialer:         customDialerFunc,   // Optional: Custom dialer function
 }
 ```
 
@@ -215,6 +221,8 @@ config := &dns.Config{
 config := &whois.Config{
     Timeout:        10 * time.Second,   // Query timeout
     FollowReferral: true,               // Follow WHOIS referrals
+    ProxyURL:       "socks5://localhost:1080", // Optional: SOCKS5 or HTTP proxy
+    Dialer:         customDialerFunc,   // Optional: Custom dialer function
     CustomServers: map[string]whois.WhoisServer{
         "example": {
             Host: "whois.example.com",
@@ -223,6 +231,52 @@ config := &whois.Config{
     },
 }
 ```
+
+### Proxy Support
+
+Both DNS and WHOIS clients support HTTP and SOCKS5 proxies:
+
+#### Using ProxyURL
+
+```go
+// SOCKS5 proxy
+dnsConfig := &dns.Config{
+    ProxyURL: "socks5://localhost:1080",
+}
+
+// HTTP proxy
+whoisConfig := &whois.Config{
+    ProxyURL: "http://proxy.example.com:8080",
+}
+```
+
+#### Using Custom Dialer
+
+For advanced use cases, you can provide your own dialer function:
+
+```go
+customDialer := func(ctx context.Context, network, address string) (net.Conn, error) {
+    // Your custom dialing logic here
+    // Examples:
+    // - Custom DNS resolution
+    // - Connection pooling
+    // - Binding to specific interfaces
+    // - Advanced routing
+    dialer := &net.Dialer{
+        Timeout:   5 * time.Second,
+        KeepAlive: 30 * time.Second,
+    }
+    return dialer.DialContext(ctx, network, address)
+}
+
+config := &dns.Config{
+    Dialer: customDialer,
+}
+```
+
+**Note**: If both `Dialer` and `ProxyURL` are set, `Dialer` takes precedence.
+
+For complete examples, see [_examples/proxy/proxy_example.go](_examples/proxy/proxy_example.go).
 
 ## Testing
 

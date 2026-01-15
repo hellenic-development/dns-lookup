@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/url"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 // RecordType represents a DNS record type used in DNS queries.
@@ -53,12 +56,22 @@ type Client struct {
 	timeout  time.Duration
 }
 
+// ContextDialer is a function type for creating network connections with context support.
+type ContextDialer func(ctx context.Context, network, address string) (net.Conn, error)
+
 // Config contains configuration options for the DNS client.
 type Config struct {
 	// Timeout for DNS queries (default: 5 seconds).
 	Timeout time.Duration
 	// CustomResolver allows specifying a custom DNS server (e.g., "8.8.8.8:53").
 	CustomResolver string
+	// Dialer allows providing a custom dialer for network connections.
+	// This enables support for proxies (HTTP, SOCKS5) and other custom network configurations.
+	// If set, this takes precedence over ProxyURL.
+	Dialer ContextDialer
+	// ProxyURL specifies a proxy server URL (e.g., "socks5://localhost:1080" or "http://proxy:8080").
+	// This is used only if Dialer is not set.
+	ProxyURL string
 }
 
 // DefaultConfig returns a default configuration with a 5-second timeout
@@ -84,14 +97,38 @@ func NewClient(config *Config) (*Client, error) {
 		timeout: config.Timeout,
 	}
 
-	if config.CustomResolver != "" {
+	// Determine which dialer to use
+	var dialFunc ContextDialer
+
+	if config.Dialer != nil {
+		// Use the custom dialer provided by the user
+		dialFunc = config.Dialer
+	} else if config.ProxyURL != "" {
+		// Create a dialer from the proxy URL
+		var err error
+		dialFunc, err = createProxyDialer(config.ProxyURL, config.Timeout)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create proxy dialer: %w", err)
+		}
+	}
+
+	if config.CustomResolver != "" || dialFunc != nil {
 		client.resolver = &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				target := address
+				if config.CustomResolver != "" {
+					target = config.CustomResolver
+				}
+
+				if dialFunc != nil {
+					return dialFunc(ctx, network, target)
+				}
+
 				d := net.Dialer{
 					Timeout: config.Timeout,
 				}
-				return d.DialContext(ctx, network, config.CustomResolver)
+				return d.DialContext(ctx, network, target)
 			},
 		}
 	} else {
@@ -99,6 +136,49 @@ func NewClient(config *Config) (*Client, error) {
 	}
 
 	return client, nil
+}
+
+// createProxyDialer creates a ContextDialer from a proxy URL string.
+func createProxyDialer(proxyURL string, timeout time.Duration) (ContextDialer, error) {
+	// Parse the proxy URL
+	parsedURL, err := url.Parse(proxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy URL: %w", err)
+	}
+
+	// Create base dialer
+	baseDialer := &net.Dialer{
+		Timeout: timeout,
+	}
+
+	// Create proxy dialer based on scheme
+	var proxyDialer proxy.Dialer
+	switch parsedURL.Scheme {
+	case "socks5", "socks5h":
+		// SOCKS5 proxy
+		proxyDialer, err = proxy.SOCKS5("tcp", parsedURL.Host, nil, baseDialer)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create SOCKS5 dialer: %w", err)
+		}
+	case "http", "https":
+		// HTTP proxy - use FromURL which supports HTTP CONNECT
+		proxyDialer, err = proxy.FromURL(parsedURL, baseDialer)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create HTTP proxy dialer: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported proxy scheme: %s (supported: socks5, http, https)", parsedURL.Scheme)
+	}
+
+	// Check if the dialer supports context
+	if contextDialer, ok := proxyDialer.(proxy.ContextDialer); ok {
+		return contextDialer.DialContext, nil
+	}
+
+	// Fallback for non-context dialers
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		return proxyDialer.Dial(network, address)
+	}, nil
 }
 
 // Lookup performs a DNS lookup for the specified domain and record type.
