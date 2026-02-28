@@ -10,8 +10,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/kataras/dns-lookup/pkg/dns"
-	"github.com/kataras/dns-lookup/pkg/lookup"
+	"github.com/hellenic-development/dns-lookup/pkg/dns"
+	"github.com/hellenic-development/dns-lookup/pkg/lookup"
 )
 
 func main() {

@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/kataras/dns-lookup/pkg/dns"
-	"github.com/kataras/dns-lookup/pkg/whois"
+	"github.com/hellenic-development/dns-lookup/pkg/dns"
+	"github.com/hellenic-development/dns-lookup/pkg/whois"
 )
 
 // Client provides unified DNS and WHOIS lookup functionality by combining

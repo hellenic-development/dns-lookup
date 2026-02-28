@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/kataras/dns-lookup/pkg/dns"
+	"github.com/hellenic-development/dns-lookup/pkg/dns"
 )
 
 func TestNewClient(t *testing.T) {

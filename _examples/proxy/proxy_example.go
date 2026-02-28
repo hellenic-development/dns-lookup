@@ -7,8 +7,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/kataras/dns-lookup/pkg/dns"
-	"github.com/kataras/dns-lookup/pkg/whois"
+	"github.com/hellenic-development/dns-lookup/pkg/dns"
+	"github.com/hellenic-development/dns-lookup/pkg/whois"
 )
 
 func main() {

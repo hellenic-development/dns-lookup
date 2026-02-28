@@ -9,7 +9,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/kataras/dns-lookup/pkg/whois"
+	"github.com/hellenic-development/dns-lookup/pkg/whois"
 )
 
 func main() {

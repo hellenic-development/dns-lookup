@@ -1,10 +1,10 @@
 # DNS Lookup & Domain WHOIS
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/kataras/dns-lookup?style=for-the-badge)](https://goreportcard.com/report/github.com/kataras/dns-lookup)
+[![Go Report Card](https://goreportcard.com/badge/github.com/hellenic-development/dns-lookup?style=for-the-badge)](https://goreportcard.com/report/github.com/hellenic-development/dns-lookup)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/kataras/dns-lookup?style=for-the-badge)](https://github.com/kataras/dns-lookup)
-[![Release](https://img.shields.io/github/v/release/kataras/dns-lookup?style=for-the-badge)](https://github.com/kataras/dns-lookup/releases)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/kataras/dns-lookup/ci.yml?branch=main&style=for-the-badge)](https://github.com/kataras/dns-lookup/actions/workflows/ci.yml)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/hellenic-development/dns-lookup?style=for-the-badge)](https://github.com/hellenic-development/dns-lookup)
+[![Release](https://img.shields.io/github/v/release/hellenic-development/dns-lookup?style=for-the-badge)](https://github.com/hellenic-development/dns-lookup/releases)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/hellenic-development/dns-lookup/ci.yml?branch=main&style=for-the-badge)](https://github.com/hellenic-development/dns-lookup/actions/workflows/ci.yml)
 
 A fully-featured DNS Lookup and Domain WHOIS package written in Go.
 
@@ -37,7 +37,7 @@ A fully-featured DNS Lookup and Domain WHOIS package written in Go.
 The only requirement is the [Go Programming Language](https://go.dev/dl/).
 
 ```bash
-go get github.com/kataras/dns-lookup@latest
+go get github.com/hellenic-development/dns-lookup@latest
 ```
 
 ## Usage
@@ -54,7 +54,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/kataras/dns-lookup/pkg/dns"
+    "github.com/hellenic-development/dns-lookup/pkg/dns"
 )
 
 func main() {
@@ -95,7 +95,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/kataras/dns-lookup/pkg/whois"
+    "github.com/hellenic-development/dns-lookup/pkg/whois"
 )
 
 func main() {
@@ -127,7 +127,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/kataras/dns-lookup/pkg/lookup"
+    "github.com/hellenic-development/dns-lookup/pkg/lookup"
 )
 
 func main() {
@@ -155,7 +155,7 @@ func main() {
 Install the CLI:
 
 ```bash
-go install github.com/kataras/dns-lookup/cmd/dns-lookup@latest
+go install github.com/hellenic-development/dns-lookup/cmd/dns-lookup@latest
 ```
 
 #### Usage Examples
