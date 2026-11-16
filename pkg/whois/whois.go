@@ -3,6 +3,7 @@ package whois
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -158,13 +159,7 @@ func NewClient(config *Config) (*Client, error) {
 			return nil, fmt.Errorf("failed to create proxy dialer: %w", err)
 		}
 	} else {
-		// Use default net.Dialer
-		dialFunc = func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := &net.Dialer{
-				Timeout: config.Timeout,
-			}
-			return d.DialContext(ctx, network, address)
-		}
+		dialFunc = defaultDialer(config.Timeout)
 	}
 
 	return &Client{
@@ -173,6 +168,14 @@ func NewClient(config *Config) (*Client, error) {
 		servers:        servers,
 		dialer:         dialFunc,
 	}, nil
+}
+
+// defaultDialer is the plain TCP dialer used when no Dialer or ProxyURL is
+// configured. The timeout is captured by value, so a caller that edits its
+// Config after NewClient does not change a live client's dial timeout.
+func defaultDialer(timeout time.Duration) ContextDialer {
+	d := &net.Dialer{Timeout: timeout}
+	return d.DialContext
 }
 
 // createProxyDialer creates a ContextDialer from a proxy URL string.
@@ -260,9 +263,13 @@ func (c *Client) Lookup(ctx context.Context, domain string) (*WhoisResult, error
 	// Check for referral server
 	if c.followReferral {
 		if referralServer := c.extractReferralServer(response); referralServer != "" {
-			// Query the referral server
 			referralResponse, err := c.query(ctx, domain, WhoisServer{Host: referralServer, Port: "43"})
-			if err == nil && len(referralResponse) > len(response) {
+			// IANA's answer describes the TLD's registry, never the domain, so
+			// the registry it refers to wins even with a short "not found".
+			// Between a registry and a registrar the longer answer still wins,
+			// so a registrar's rate-limit notice cannot replace a full record.
+			fromIANA := server.Host == "whois.iana.org"
+			if err == nil && strings.TrimSpace(referralResponse) != "" && (fromIANA || len(referralResponse) > len(response)) {
 				result.RawResponse = referralResponse
 				result.Server = referralServer + ":43"
 			}
@@ -280,27 +287,46 @@ func (c *Client) Lookup(ctx context.Context, domain string) (*WhoisResult, error
 func (c *Client) query(ctx context.Context, domain string, server WhoisServer) (string, error) {
 	address := net.JoinHostPort(server.Host, server.Port)
 
-	dialer := &net.Dialer{
-		Timeout: c.timeout,
+	dial := c.dialer
+	if dial == nil {
+		// A Client not built by NewClient: dial as NewClient would by default,
+		// as v1.0.3 always did, instead of panicking on the nil func.
+		dial = defaultDialer(c.timeout)
 	}
-
-	conn, err := dialer.DialContext(ctx, "tcp", address)
+	conn, err := dial(ctx, "tcp", address)
 	if err != nil {
 		return "", fmt.Errorf("failed to connect to WHOIS server %s: %w", address, err)
 	}
 	defer conn.Close()
 
-	// Set deadline for the entire operation
-	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(deadline)
-	} else {
-		conn.SetDeadline(time.Now().Add(c.timeout))
+	// A cancelled context closes the connection, so the read below returns at
+	// once and not at the deadline.
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+
+	// The deadline of the whole query is the earlier of the context's and
+	// now + Timeout: Timeout bounds one query in every case and the context
+	// can only shorten it. contextBound records which one is in force, so a
+	// timeout is reported as the context's deadline only when it was.
+	var deadline time.Time
+	if c.timeout > 0 {
+		deadline = time.Now().Add(c.timeout)
 	}
+	ctxDeadline, contextBound := ctx.Deadline()
+	if contextBound && (deadline.IsZero() || ctxDeadline.Before(deadline)) {
+		deadline = ctxDeadline
+	} else {
+		contextBound = false
+	}
+	conn.SetDeadline(deadline)
 
 	// Send the query
 	query := domain + "\r\n"
 	_, err = conn.Write([]byte(query))
 	if err != nil {
+		if err := stoppedByContext(ctx, contextBound, address, err); err != nil {
+			return "", err
+		}
 		return "", fmt.Errorf("failed to send query: %w", err)
 	}
 
@@ -312,11 +338,32 @@ func (c *Client) query(ctx context.Context, domain string, server WhoisServer) (
 		response.WriteString("\n")
 	}
 
+	// A read cut short by the context is the caller's cancellation or
+	// deadline, not a half answer and not a network error.
+	if err := stoppedByContext(ctx, contextBound, address, scanner.Err()); err != nil {
+		return "", err
+	}
 	if err := scanner.Err(); err != nil {
 		return "", fmt.Errorf("error reading response: %w", err)
 	}
 
 	return response.String(), nil
+}
+
+// stoppedByContext returns the context's error, wrapped with the server's
+// address, when the context ended the query; otherwise nil. When the
+// connection's deadline is the context's (contextBound), the connection's
+// timer and the context's fire at the same instant and either may wake the
+// read first, so a timeout error then also counts as context.DeadlineExceeded.
+// Every shape returned satisfies errors.Is with the context's error.
+func stoppedByContext(ctx context.Context, contextBound bool, address string, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("WHOIS query to %s stopped: %w", address, ctxErr)
+	}
+	if ne, ok := errors.AsType[net.Error](err); contextBound && ok && ne.Timeout() {
+		return fmt.Errorf("WHOIS query to %s stopped: %w", address, context.DeadlineExceeded)
+	}
+	return nil
 }
 
 // getWhoisServer determines the appropriate WHOIS server for a domain
@@ -346,7 +393,8 @@ func (c *Client) getWhoisServer(domain string) (WhoisServer, error) {
 }
 
 // extractReferralServer extracts referral WHOIS server information from the response,
-// looking for "Whois Server:", "Referral URL:", or "Refer:" fields.
+// looking for "Whois Server:", "Registrar WHOIS Server:", "Referral URL:", or
+// "Refer:" fields.
 func (c *Client) extractReferralServer(response string) string {
 	lines := strings.Split(response, "\n")
 	for _, line := range lines {
@@ -354,6 +402,7 @@ func (c *Client) extractReferralServer(response string) string {
 		lower := strings.ToLower(line)
 
 		if strings.HasPrefix(lower, "whois server:") ||
+			strings.HasPrefix(lower, "registrar whois server:") ||
 			strings.HasPrefix(lower, "referral url:") ||
 			strings.HasPrefix(lower, "refer:") {
 
