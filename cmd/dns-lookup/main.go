@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	version = "1.0.4"
+	version = "1.0.5"
 	banner  = `
 ╔═══════════════════════════════════════╗
 ║   DNS Lookup & WHOIS Tool v%s    ║
@@ -24,17 +24,18 @@ const (
 )
 
 type options struct {
-	domain         string
-	recordType     string
-	whoisOnly      bool
-	dnsOnly        bool
-	all            bool
-	jsonOutput     bool
-	timeout        int
-	customResolver string
-	followReferral bool
-	srv            string
-	showVersion    bool
+	domain          string
+	recordType      string
+	whoisOnly       bool
+	dnsOnly         bool
+	all             bool
+	jsonOutput      bool
+	timeout         int
+	customResolver  string
+	followReferral  bool
+	followRegistrar bool
+	srv             string
+	showVersion     bool
 }
 
 func main() {
@@ -64,8 +65,9 @@ func main() {
 			CustomResolver: opts.customResolver,
 		},
 		WHOIS: &whois.Config{
-			Timeout:        time.Duration(opts.timeout) * time.Second,
-			FollowReferral: opts.followReferral,
+			Timeout:                 time.Duration(opts.timeout) * time.Second,
+			FollowReferral:          opts.followReferral,
+			FollowRegistrarReferral: opts.followRegistrar,
 		},
 	}
 
@@ -110,7 +112,8 @@ func parseFlags() *options {
 	flag.BoolVar(&opts.jsonOutput, "j", false, "Output in JSON format (shorthand)")
 	flag.IntVar(&opts.timeout, "timeout", 10, "Timeout in seconds")
 	flag.StringVar(&opts.customResolver, "resolver", "", "Custom DNS resolver (e.g., 8.8.8.8:53)")
-	flag.BoolVar(&opts.followReferral, "follow", true, "Follow WHOIS referrals")
+	flag.BoolVar(&opts.followReferral, "follow", true, "Follow the registry server IANA names for a TLD without a listed WHOIS server")
+	flag.BoolVar(&opts.followRegistrar, "follow-registrar", false, "Also ask the registrar's WHOIS server a registry names (one more connection per name; does nothing with -follow=false)")
 	flag.StringVar(&opts.srv, "srv", "", "SRV lookup in format: service,proto,name (e.g., xmpp,tcp,example.com)")
 	flag.BoolVar(&opts.showVersion, "version", false, "Show version information")
 	flag.BoolVar(&opts.showVersion, "v", false, "Show version (shorthand)")
@@ -123,6 +126,7 @@ func parseFlags() *options {
 		fmt.Fprintf(os.Stderr, "  %s -d example.com                    # DNS A record lookup\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -d example.com -t MX              # DNS MX record lookup\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -d example.com -w                 # WHOIS lookup only\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -d example.com -w -follow-registrar  # WHOIS, also asking the registrar\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -d example.com -a                 # All DNS records + WHOIS\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -d example.com -j                 # Output as JSON\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -srv xmpp,tcp,example.com         # SRV record lookup\n", os.Args[0])

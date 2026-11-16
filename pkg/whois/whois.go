@@ -5,10 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/net/proxy"
 )
@@ -17,10 +20,37 @@ import (
 type WhoisServer struct {
 	Host string
 	Port string
+	// QueryFormat is how the domain is written into the query line for this
+	// server: the text with "%s" where the domain goes, for a registry that
+	// needs flags. Empty sends the bare domain, as most servers expect, and
+	// so does a format without "%s", so a query never goes out without the
+	// domain. A referral to a host that a table row names gets that row's
+	// format too, so DENIC reached through IANA is asked like DENIC reached
+	// from the table.
+	QueryFormat string
+	// UnicodeQueryFormat is used in place of QueryFormat when the domain has
+	// a character outside ASCII, for a registry whose flags differ by the
+	// form the name is sent in. The same rule applies: a format without
+	// "%s" is ignored. Empty means QueryFormat is used for every name. A
+	// referral target gets this from a table row with its host, as it gets
+	// QueryFormat.
+	UnicodeQueryFormat string
 }
 
 // DefaultWhoisServers maps TLDs to their corresponding WHOIS servers,
-// supporting 50+ top-level domains including gTLDs and ccTLDs.
+// supporting 40+ top-level domains including gTLDs and ccTLDs. A TLD that is
+// not listed goes to IANA, which names its registry's server; .app and .dev
+// are left to that path on purpose, since whois.nic.google no longer resolves
+// and IANA's record of .app names no WHOIS server.
+//
+// DENIC (.de) needs flags that depend on the form of the name. Sent live for
+// bücher.de: a bare "bücher.de" gets only Domain, Domain-Ace and Status;
+// "-T dn bücher.de" gets the full record (Domain, Domain-Ace, Nserver lines,
+// Status, Changed); "-T dn,ace bücher.de" gets "% Error: 55000000010 Non
+// bijective ace-idn convertible domain"; "-T dn xn--bcher-kva.de" gets
+// "Status: invalid"; "-T dn,ace xn--bcher-kva.de" gets the full record. So
+// "ace" means the name is sent in its xn-- form: an ASCII name is asked with
+// "-T dn,ace" and a Unicode one with "-T dn".
 var DefaultWhoisServers = map[string]WhoisServer{
 	"com":     {Host: "whois.verisign-grs.com", Port: "43"},
 	"net":     {Host: "whois.verisign-grs.com", Port: "43"},
@@ -31,7 +61,7 @@ var DefaultWhoisServers = map[string]WhoisServer{
 	"uk":      {Host: "whois.nic.uk", Port: "43"},
 	"co.uk":   {Host: "whois.nic.uk", Port: "43"},
 	"ca":      {Host: "whois.cira.ca", Port: "43"},
-	"de":      {Host: "whois.denic.de", Port: "43"},
+	"de":      {Host: "whois.denic.de", Port: "43", QueryFormat: "-T dn,ace %s", UnicodeQueryFormat: "-T dn %s"},
 	"jp":      {Host: "whois.jprs.jp", Port: "43"},
 	"fr":      {Host: "whois.nic.fr", Port: "43"},
 	"au":      {Host: "whois.auda.org.au", Port: "43"},
@@ -45,8 +75,6 @@ var DefaultWhoisServers = map[string]WhoisServer{
 	"me":      {Host: "whois.nic.me", Port: "43"},
 	"tv":      {Host: "whois.nic.tv", Port: "43"},
 	"cc":      {Host: "whois.nic.cc", Port: "43"},
-	"app":     {Host: "whois.nic.google", Port: "43"},
-	"dev":     {Host: "whois.nic.google", Port: "43"},
 	"ai":      {Host: "whois.nic.ai", Port: "43"},
 	"co":      {Host: "whois.nic.co", Port: "43"},
 	"asia":    {Host: "whois.nic.asia", Port: "43"},
@@ -92,19 +120,34 @@ type ContextDialer func(ctx context.Context, network, address string) (net.Conn,
 // Client is a WHOIS lookup client that performs WHOIS queries with support
 // for automatic referral following and configurable timeouts.
 type Client struct {
-	timeout        time.Duration
-	followReferral bool
-	servers        map[string]WhoisServer
-	dialer         ContextDialer
+	timeout                 time.Duration
+	followReferral          bool
+	followRegistrarReferral bool
+	servers                 map[string]WhoisServer
+	dialer                  ContextDialer
 }
 
 // Config contains configuration options for the WHOIS client.
 type Config struct {
-	// Timeout for WHOIS queries (default: 10 seconds).
+	// Timeout for WHOIS queries (default: 10 seconds). A value that is not
+	// positive means the default.
 	Timeout time.Duration
-	// FollowReferral automatically follows referral WHOIS servers.
+	// FollowReferral follows the registry server that IANA names for a TLD
+	// the server table does not list.
 	FollowReferral bool
-	// CustomServers allows overriding default WHOIS servers.
+	// FollowRegistrarReferral, together with FollowReferral, also follows
+	// the registrar's WHOIS server that a registry's reply names, and keeps
+	// the registrar's reply when it is longer. Off by default: that second
+	// connection costs a round trip per name (a silent registrar costs up to
+	// Timeout), and registrars mostly answer with less than the registry.
+	// It applies only to a TLD the server table lists (after an IANA
+	// referral the registry's answer is final, with this on or off), and it
+	// does nothing when FollowReferral is false.
+	FollowRegistrarReferral bool
+	// CustomServers allows overriding default WHOIS servers. A caller who
+	// replaces CustomServers["default"] (whois.iana.org) has that server's
+	// referral followed only with FollowRegistrarReferral on, since only a
+	// reply from whois.iana.org counts as IANA's.
 	CustomServers map[string]WhoisServer
 	// Dialer allows providing a custom dialer for network connections.
 	// This enables support for proxies (HTTP, SOCKS5) and other custom network configurations.
@@ -116,7 +159,8 @@ type Config struct {
 }
 
 // DefaultConfig returns a default configuration with a 10-second timeout,
-// automatic referral following enabled, and empty custom servers map.
+// IANA referral following enabled, the registrar leg off, and an empty
+// custom servers map.
 func DefaultConfig() *Config {
 	return &Config{
 		Timeout:        10 * time.Second,
@@ -132,7 +176,8 @@ func NewClient(config *Config) (*Client, error) {
 		config = DefaultConfig()
 	}
 
-	if config.Timeout == 0 {
+	// A negative Timeout would leave a custom Dialer's read with no bound.
+	if config.Timeout <= 0 {
 		config.Timeout = 10 * time.Second
 	}
 
@@ -163,10 +208,11 @@ func NewClient(config *Config) (*Client, error) {
 	}
 
 	return &Client{
-		timeout:        config.Timeout,
-		followReferral: config.FollowReferral,
-		servers:        servers,
-		dialer:         dialFunc,
+		timeout:                 config.Timeout,
+		followReferral:          config.FollowReferral,
+		followRegistrarReferral: config.FollowRegistrarReferral,
+		servers:                 servers,
+		dialer:                  dialFunc,
 	}, nil
 }
 
@@ -224,6 +270,11 @@ func createProxyDialer(proxyURL string, timeout time.Duration) (ContextDialer, e
 // Lookup performs a WHOIS lookup for the specified domain, automatically
 // determining the appropriate WHOIS server and following referrals if enabled.
 // If ctx is nil, a new context with the client's timeout is created.
+// The domain is sent as given (lower-cased and trimmed), never converted
+// between its Unicode and xn-- forms; the server table's formats say how
+// each form is asked. A result whose Server is "whois.iana.org:43" describes
+// the TLD's record, not the domain (its created: and changed: dates are the
+// TLD's), except under a TLD IANA itself runs, such as .int.
 func (c *Client) Lookup(ctx context.Context, domain string) (*WhoisResult, error) {
 	if ctx == nil {
 		var cancel context.CancelFunc
@@ -260,15 +311,18 @@ func (c *Client) Lookup(ctx context.Context, domain string) (*WhoisResult, error
 
 	result.RawResponse = response
 
-	// Check for referral server
-	if c.followReferral {
+	// Check for referral server. A referral in IANA's answer is how the
+	// registry of an unlisted TLD is reached; a referral in any other
+	// server's answer is a registry naming the registrar, followed only when
+	// the registrar leg is on.
+	fromIANA := server.Host == "whois.iana.org"
+	if c.followReferral && (fromIANA || c.followRegistrarReferral) {
 		if referralServer := c.extractReferralServer(response); referralServer != "" {
-			referralResponse, err := c.query(ctx, domain, WhoisServer{Host: referralServer, Port: "43"})
+			referralResponse, err := c.query(ctx, domain, c.referralServer(referralServer))
 			// IANA's answer describes the TLD's registry, never the domain, so
 			// the registry it refers to wins even with a short "not found".
 			// Between a registry and a registrar the longer answer still wins,
 			// so a registrar's rate-limit notice cannot replace a full record.
-			fromIANA := server.Host == "whois.iana.org"
 			if err == nil && strings.TrimSpace(referralResponse) != "" && (fromIANA || len(referralResponse) > len(response)) {
 				result.RawResponse = referralResponse
 				result.Server = referralServer + ":43"
@@ -304,25 +358,19 @@ func (c *Client) query(ctx context.Context, domain string, server WhoisServer) (
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
 
-	// The deadline of the whole query is the earlier of the context's and
-	// now + Timeout: Timeout bounds one query in every case and the context
-	// can only shorten it. contextBound records which one is in force, so a
-	// timeout is reported as the context's deadline only when it was.
-	var deadline time.Time
-	if c.timeout > 0 {
-		deadline = time.Now().Add(c.timeout)
-	}
-	ctxDeadline, contextBound := ctx.Deadline()
-	if contextBound && (deadline.IsZero() || ctxDeadline.Before(deadline)) {
-		deadline = ctxDeadline
-	} else {
-		contextBound = false
-	}
+	// The connection's deadline bounds this leg's write and read, set once
+	// the dial has returned: the dial is outside it and has its own bound
+	// (the default and proxy dialers use Timeout, a custom Dialer its own),
+	// so one leg can take a dial Timeout plus a read Timeout, and a lookup
+	// that follows a referral runs two legs. contextBound records which
+	// deadline is in force, so a timeout is reported as the context's only
+	// when it was.
+	ctxDeadline, hasCtxDeadline := ctx.Deadline()
+	deadline, contextBound := queryDeadline(time.Now(), c.timeout, ctxDeadline, hasCtxDeadline)
 	conn.SetDeadline(deadline)
 
 	// Send the query
-	query := domain + "\r\n"
-	_, err = conn.Write([]byte(query))
+	_, err = conn.Write([]byte(server.queryLine(domain)))
 	if err != nil {
 		if err := stoppedByContext(ctx, contextBound, address, err); err != nil {
 			return "", err
@@ -348,6 +396,70 @@ func (c *Client) query(ctx context.Context, domain string, server WhoisServer) (
 	}
 
 	return response.String(), nil
+}
+
+// queryLine is the line sent to the server for domain: the domain written
+// into QueryFormat (UnicodeQueryFormat for a name with a character outside
+// ASCII, when it has "%s"), or the bare domain, ended with CRLF. A format
+// without "%s" is ignored, so a query never goes out without the domain.
+func (s WhoisServer) queryLine(domain string) string {
+	format := s.QueryFormat
+	if strings.Contains(s.UnicodeQueryFormat, "%s") && !isASCII(domain) {
+		format = s.UnicodeQueryFormat
+	}
+	if !strings.Contains(format, "%s") {
+		return domain + "\r\n"
+	}
+	return strings.Replace(format, "%s", domain, 1) + "\r\n"
+}
+
+// looksLikeHost reports whether token, the first word of a line under a
+// "Name servers:" heading, is shaped like a host name: it holds a dot once
+// one trailing dot is trimmed, has no colon, and is not an IP address.
+func looksLikeHost(token string) bool {
+	name := strings.TrimSuffix(token, ".")
+	return strings.Contains(name, ".") && !strings.Contains(name, ":") && net.ParseIP(name) == nil
+}
+
+// isASCII reports whether s has no byte outside ASCII.
+func isASCII(s string) bool {
+	for i := range len(s) {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// referralServer is the server a referral names, on the WHOIS port, with
+// the query format the table gives that host, so a registry reached through
+// IANA is asked the way it would be asked directly.
+func (c *Client) referralServer(host string) WhoisServer {
+	server := WhoisServer{Host: host, Port: "43"}
+	for _, tld := range slices.Sorted(maps.Keys(c.servers)) {
+		if known := c.servers[tld]; strings.EqualFold(known.Host, host) && (known.QueryFormat != "" || known.UnicodeQueryFormat != "") {
+			server.QueryFormat = known.QueryFormat
+			server.UnicodeQueryFormat = known.UnicodeQueryFormat
+			break
+		}
+	}
+	return server
+}
+
+// queryDeadline picks the connection deadline of one query leg: the earlier
+// of the context's deadline and now + timeout, so Timeout bounds the leg in
+// every case and the context can only shorten it. On an exact tie the
+// context's deadline wins, so a timeout at that instant is always reported as
+// the context's. contextBound reports that the context's deadline is the one
+// in force.
+func queryDeadline(now time.Time, timeout time.Duration, ctxDeadline time.Time, hasCtxDeadline bool) (deadline time.Time, contextBound bool) {
+	if timeout > 0 {
+		deadline = now.Add(timeout)
+	}
+	if hasCtxDeadline && (deadline.IsZero() || !ctxDeadline.After(deadline)) {
+		return ctxDeadline, true
+	}
+	return deadline, false
 }
 
 // stoppedByContext returns the context's error, wrapped with the server's
@@ -432,14 +544,82 @@ func (c *Client) parseResponse(result *WhoisResult) {
 
 	emailMap := make(map[string]bool)
 	nsMap := make(map[string]bool)
+	addNameServer := func(ns string) {
+		ns = strings.ToLower(ns)
+		if !nsMap[ns] {
+			nameServers = append(nameServers, ns)
+			nsMap[ns] = true
+		}
+	}
+
+	// section is the heading of the block the line is in, for the formats
+	// that put a value on the lines under a bare "Heading:" (Nominet, EURid)
+	// instead of after the colon. A blank line ends the block.
+	var section string
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "%") || strings.HasPrefix(line, "#") {
+		if line == "" {
+			section = ""
+			continue
+		}
+		if strings.HasPrefix(line, "%") || strings.HasPrefix(line, "#") {
 			continue
 		}
 
 		lower := strings.ToLower(line)
+
+		// A heading has one colon, at its end; an IPv6 address under
+		// "Name servers:" can end in "::" but has more than one colon.
+		if strings.HasSuffix(lower, ":") && strings.Count(lower, ":") == 1 {
+			section = strings.TrimSuffix(lower, ":")
+			continue
+		}
+
+		switch section {
+		case "registrar":
+			// Nominet writes the registrar's name on the first line under
+			// the heading; EURid writes "Name: <registrar>". The other
+			// lines there (URL, Website) are not the name.
+			if result.Registrar == "" {
+				key, value, hasColon := strings.Cut(line, ":")
+				switch {
+				case !hasColon:
+					result.Registrar = line
+				case strings.EqualFold(strings.TrimSpace(key), "name"):
+					result.Registrar = strings.TrimSpace(value)
+				}
+			}
+		case "name servers":
+			// One server per line, its addresses after it. Only a line whose
+			// first word looks like a host name is a server: a dot once one
+			// trailing dot is set aside ("None." is not a host), no colon,
+			// and not an IP address. The server is stored as written,
+			// trailing dot included, as the "Name Server:" rule stores it. A
+			// "key: value" line (nserver:, changed:, DNS:) falls through to
+			// the rules below, which read it or not as they would anywhere
+			// else; any other line ("No name servers listed.", an address
+			// first) is read by nothing.
+			fields := strings.Fields(line)
+			if len(fields) > 0 && looksLikeHost(fields[0]) {
+				addNameServer(fields[0])
+				continue
+			}
+			if !strings.Contains(line, ":") {
+				continue
+			}
+		}
+
+		// Nominet's creation date and DENIC's change date.
+		if result.CreatedDate == "" && strings.HasPrefix(lower, "registered on:") {
+			result.CreatedDate = strings.TrimSpace(line[len("registered on:"):])
+		}
+		// A changed: line fills UpdatedDate only when no earlier line gave
+		// an update date, so a contact's or a TLD record's changed: further
+		// down never replaces the domain's; with no earlier date it is taken.
+		if result.UpdatedDate == "" && strings.HasPrefix(lower, "changed:") {
+			result.UpdatedDate = strings.TrimSpace(line[len("changed:"):])
+		}
 
 		// Extract registrar
 		if result.Registrar == "" && (strings.Contains(lower, "registrar:") || strings.Contains(lower, "registrar name:")) {
@@ -476,15 +656,11 @@ func (c *Client) parseResponse(result *WhoisResult) {
 			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
 				ns := strings.TrimSpace(parts[1])
-				ns = strings.ToLower(ns)
 				// Remove any additional info after whitespace
 				if idx := strings.Index(ns, " "); idx > 0 {
 					ns = ns[:idx]
 				}
-				if !nsMap[ns] {
-					nameServers = append(nameServers, ns)
-					nsMap[ns] = true
-				}
+				addNameServer(ns)
 			}
 		}
 

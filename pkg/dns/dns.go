@@ -61,10 +61,16 @@ type ContextDialer func(ctx context.Context, network, address string) (net.Conn,
 
 // Config contains configuration options for the DNS client.
 type Config struct {
-	// Timeout for DNS queries (default: 5 seconds).
+	// Timeout for DNS queries (default: 5 seconds). A value that is not
+	// positive means the default.
 	Timeout time.Duration
 	// CustomResolver allows specifying a custom DNS server (e.g., "8.8.8.8:53").
 	CustomResolver string
+	// Resolver, if set, is used as given for every lookup, and
+	// CustomResolver, Dialer and ProxyURL are not consulted.
+	// Resolver: net.DefaultResolver gives back the system resolver, which is
+	// what v1.0.4 used by default.
+	Resolver *net.Resolver
 	// Dialer allows providing a custom dialer for network connections.
 	// This enables support for proxies (HTTP, SOCKS5) and other custom network configurations.
 	// If set, this takes precedence over ProxyURL.
@@ -75,7 +81,7 @@ type Config struct {
 }
 
 // DefaultConfig returns a default configuration with a 5-second timeout
-// and the system's default DNS resolver.
+// and Go's own resolver asking the system's configured DNS servers.
 func DefaultConfig() *Config {
 	return &Config{
 		Timeout: 5 * time.Second,
@@ -89,12 +95,18 @@ func NewClient(config *Config) (*Client, error) {
 		config = DefaultConfig()
 	}
 
-	if config.Timeout == 0 {
+	// A negative Timeout would hand every lookup an expired context.
+	if config.Timeout <= 0 {
 		config.Timeout = 5 * time.Second
 	}
 
 	client := &Client{
 		timeout: config.Timeout,
+	}
+
+	if config.Resolver != nil {
+		client.resolver = config.Resolver
+		return client, nil
 	}
 
 	// Determine which dialer to use
@@ -132,7 +144,20 @@ func NewClient(config *Config) (*Client, error) {
 			},
 		}
 	} else {
-		client.resolver = net.DefaultResolver
+		// Go's own resolver, which sends DNS queries to the system's
+		// configured servers, on every platform. The system path on Windows
+		// (GetAddrInfoW) was seen answering "no data" for AAAA exactly when
+		// the name had AAAA records. With PreferGo every lookup this client
+		// makes takes the Go path on Windows (read in Go 1.27,
+		// net/lookup_windows.go: LookupIP and LookupCNAME through
+		// hostLookupOrder, LookupAddr through addrLookupOrder, SRV, MX, NS
+		// and TXT through mustUseGoResolver; conf.go returns the files-then-
+		// DNS order for PreferGo on Windows, never cgo). On Windows Go takes
+		// its servers only from adapters that are up and have a gateway
+		// (dnsconfig_windows.go), and with none it asks 127.0.0.1:53 and
+		// [::1]:53 (defaultNS in dnsconfig.go). A fresh Resolver, so the
+		// process-wide net.DefaultResolver is left alone.
+		client.resolver = &net.Resolver{PreferGo: true}
 	}
 
 	return client, nil

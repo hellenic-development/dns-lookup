@@ -19,8 +19,8 @@ A fully-featured DNS Lookup and Domain WHOIS package written in Go.
 - **Context Support**: Full context.Context integration for cancellation and timeouts
 
 ### WHOIS Lookup
-- **Extensive TLD Support**: 50+ TLDs with dedicated WHOIS servers
-- **Automatic Referrals**: Follows WHOIS server referrals automatically
+- **Extensive TLD Support**: 40+ TLDs with dedicated WHOIS servers
+- **Referrals**: For a TLD without a listed server, follows IANA to the registry's WHOIS server; following the registrar's server a registry names is opt-in (`FollowRegistrarReferral`, CLI `-follow-registrar`) and does nothing while `FollowReferral` is off
 - **Proxy Support**: HTTP and SOCKS5 proxy support via ProxyURL or custom dialers
 - **Custom Dialers**: Bring your own dialer for advanced network configurations
 - **Parsed Data**: Extracts registrar, dates, name servers, status, and emails
@@ -197,7 +197,8 @@ dns-lookup -v
 -j, -json         Output results in JSON format
 -timeout          Timeout in seconds (default: 10)
 -resolver         Custom DNS resolver (e.g., 8.8.8.8:53)
--follow           Follow WHOIS referrals (default: true)
+-follow           Follow IANA's referral to a TLD's registry (default: true)
+-follow-registrar Also ask the registrar's WHOIS server; needs -follow (default: false)
 -srv              SRV lookup in format: service,proto,name
 -v, -version      Show version information
 ```
@@ -210,6 +211,7 @@ dns-lookup -v
 config := &dns.Config{
     Timeout:        5 * time.Second,    // Query timeout
     CustomResolver: "8.8.8.8:53",       // Custom DNS server
+    Resolver:       nil,                // Optional: a *net.Resolver used as given (net.DefaultResolver for the system resolver)
     ProxyURL:       "socks5://localhost:1080", // Optional: SOCKS5 or HTTP proxy
     Dialer:         customDialerFunc,   // Optional: Custom dialer function
 }
@@ -220,7 +222,8 @@ config := &dns.Config{
 ```go
 config := &whois.Config{
     Timeout:        10 * time.Second,   // Query timeout
-    FollowReferral: true,               // Follow WHOIS referrals
+    FollowReferral: true,               // Follow IANA's referral to a TLD's registry
+    FollowRegistrarReferral: false,     // Also ask the registrar's server (one more connection)
     ProxyURL:       "socks5://localhost:1080", // Optional: SOCKS5 or HTTP proxy
     Dialer:         customDialerFunc,   // Optional: Custom dialer function
     CustomServers: map[string]whois.WhoisServer{
@@ -308,10 +311,10 @@ go test -v ./pkg/lookup
 
 ## Supported TLDs
 
-The WHOIS package includes dedicated servers for 50+ TLDs including:
+The WHOIS package includes dedicated servers for 40+ TLDs including:
 - Generic: com, net, org, info, biz
 - Country codes: uk, ca, de, jp, fr, au, ru, ch, it, nl, eu, nz, in, cn, br, mx, se, be, at, dk, fi, is, cz, pl
-- New gTLDs: io, me, tv, cc, app, dev, ai, co, asia, mobi, tel
+- New gTLDs: io, me, tv, cc, ai, co, asia, mobi, tel
 
 ## License
 

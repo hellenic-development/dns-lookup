@@ -16,7 +16,7 @@ func main() {
 	// Create a WHOIS client with custom configuration
 	config := &whois.Config{
 		Timeout:        10 * time.Second,
-		FollowReferral: true, // Automatically follow referral WHOIS servers
+		FollowReferral: true, // Follow IANA's referral to the registry of a TLD the table does not list
 	}
 
 	client, err := whois.NewClient(config)

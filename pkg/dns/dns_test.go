@@ -2,6 +2,8 @@ package dns
 
 import (
 	"context"
+	"errors"
+	"net"
 	"testing"
 	"time"
 )
@@ -49,6 +51,67 @@ func TestNewClient(t *testing.T) {
 				t.Error("NewClient() returned nil client")
 			}
 		})
+	}
+}
+
+// TestNewClientDefaultResolverPrefersGo: without a custom resolver the client
+// sends its own DNS queries through Go's resolver on every platform. On
+// Windows the system path (GetAddrInfoW) answered "no data" for names that
+// have AAAA records.
+func TestNewClientDefaultResolverPrefersGo(t *testing.T) {
+	for name, config := range map[string]*Config{"nil config": nil, "default config": DefaultConfig()} {
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("%s: NewClient: %v", name, err)
+		}
+		if client.resolver == nil || !client.resolver.PreferGo {
+			t.Errorf("%s: resolver %+v does not prefer Go", name, client.resolver)
+		}
+		if client.resolver == net.DefaultResolver {
+			t.Errorf("%s: the client must not set PreferGo on the process-wide net.DefaultResolver", name)
+		}
+		if client.resolver != nil && client.resolver.Dial != nil {
+			t.Errorf("%s: the default resolver must ask the system's configured DNS servers, not a custom Dial", name)
+		}
+	}
+}
+
+// TestNewClientKeepsACustomResolver: a caller's Resolver is used as given,
+// whatever else the config holds.
+func TestNewClientKeepsACustomResolver(t *testing.T) {
+	custom := &net.Resolver{PreferGo: true, StrictErrors: true}
+	for name, config := range map[string]*Config{
+		"resolver alone": {Resolver: custom},
+		"resolver beside an address and a dialer": {
+			Resolver:       custom,
+			CustomResolver: "127.0.0.1:1",
+			Dialer: func(context.Context, string, string) (net.Conn, error) {
+				return nil, errors.New("not used")
+			},
+		},
+	} {
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("%s: NewClient: %v", name, err)
+		}
+		if client.resolver != custom {
+			t.Errorf("%s: resolver is %p, want the caller's %p", name, client.resolver, custom)
+		}
+	}
+}
+
+// TestNewClientMapsANonPositiveTimeoutToTheDefault: a negative Timeout (the
+// CLI's -timeout -1) would hand every lookup a context that has already
+// expired.
+func TestNewClientMapsANonPositiveTimeoutToTheDefault(t *testing.T) {
+	for _, timeout := range []time.Duration{0, -1, -time.Second} {
+		client, err := NewClient(&Config{Timeout: timeout})
+		if err != nil {
+			t.Fatalf("NewClient(Timeout %s): %v", timeout, err)
+		}
+		if client.timeout != 5*time.Second {
+			t.Errorf("Timeout %s became %s, want the 5s default", timeout, client.timeout)
+		}
 	}
 }
 
